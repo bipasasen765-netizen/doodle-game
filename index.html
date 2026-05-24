@@ -115,10 +115,10 @@ html, body { width:100%; height:100%; overflow:hidden; background:#000; }
 <div class="screen" id="startScreen">
   <h2>🍉 Fruit Slash</h2>
   <p>
-    ✋ Use your <b>index fingers</b> to slash fruits!<br/>
+    📱 <b>Mobile:</b> Swipe with your fingers to slash!<br/>
+    🖥️ <b>Desktop:</b> Use index fingers via camera!<br/>
     💣 Avoid bombs — they cost a life!<br/>
-    🎯 Hit 5 in a row for a combo bonus!<br/>
-    Show your hands to the camera and start!
+    🎯 Hit 3 in a row for a combo bonus!
   </p>
   <button class="play-btn" onclick="startGame()">▶ Start Game</button>
 </div>
@@ -556,39 +556,81 @@ function endGame(){
 const videoEl=document.getElementById('videoEl');
 const camStatus=document.getElementById('camStatus');
 
-const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
-hands.setOptions({
-  maxNumHands:2,
-  modelComplexity:1,
-  minDetectionConfidence:0.65,
-  minTrackingConfidence:0.55
-});
+// ── Device Detection ──────────────────────────────────────
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-hands.onResults(results=>{
-  indexFingers=[];
-  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
-    results.multiHandLandmarks.forEach((lm,hi)=>{
-      const tip=lm[8];
-      const x=(1-tip.x)*W, y=tip.y*H;
+if(isMobile){
+  // ── MOBILE: Touch Trail ───────────────────────────────
+  document.getElementById('camStatus').style.display='none';
+  document.getElementById('videoEl').style.display='none';
+
+  function handleTouch(e){
+    e.preventDefault();
+    indexFingers=[];
+    const rect=canvas.getBoundingClientRect();
+    const scaleX=W/rect.width, scaleY=H/rect.height;
+    Array.from(e.touches).forEach((t,i)=>{
+      const x=(t.clientX-rect.left)*scaleX;
+      const y=(t.clientY-rect.top)*scaleY;
       indexFingers.push({x,y});
-      if(!trails[hi]) trails[hi]={pts:[]};
-      trails[hi].pts.push({x,y,t:1});
-      if(trails[hi].pts.length>28) trails[hi].pts.shift();
+      if(!trails[i]) trails[i]={pts:[]};
+      trails[i].pts.push({x,y,t:1});
+      if(trails[i].pts.length>28) trails[i].pts.shift();
     });
-    camStatus.textContent='';
-  } else {
-    trails.forEach(t=>t.pts=[]);
-    camStatus.textContent='☝️ Show your index fingers to the camera!';
   }
-});
+  function handleTouchEnd(){
+    indexFingers=[];
+    trails.forEach(t=>t.pts=[]);
+  }
+  canvas.addEventListener('touchstart', handleTouch, {passive:false});
+  canvas.addEventListener('touchmove',  handleTouch, {passive:false});
+  canvas.addEventListener('touchend',   handleTouchEnd);
+  canvas.addEventListener('touchcancel',handleTouchEnd);
 
-const camera=new Camera(videoEl,{
-  onFrame:async()=>{ await hands.send({image:videoEl}); },
-  width:1280, height:720
-});
-camera.start()
-  .then(()=>{ camStatus.textContent='✅ Camera ready! Press Start 🎮'; })
-  .catch(()=>{ camStatus.textContent='⚠️ Camera blocked! Please allow camera access.'; });
+} else {
+  // ── DESKTOP: Mouse fallback + MediaPipe ──────────────
+  canvas.addEventListener('mousemove', e=>{
+    if(!gameRunning) return;
+    const rect=canvas.getBoundingClientRect();
+    const scaleX=W/rect.width, scaleY=H/rect.height;
+    const x=(e.clientX-rect.left)*scaleX;
+    const y=(e.clientY-rect.top)*scaleY;
+    indexFingers=[{x,y}];
+    if(!trails[0]) trails[0]={pts:[]};
+    trails[0].pts.push({x,y,t:1});
+    if(trails[0].pts.length>28) trails[0].pts.shift();
+  });
+
+  const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+  hands.setOptions({
+    maxNumHands:2, modelComplexity:1,
+    minDetectionConfidence:0.65, minTrackingConfidence:0.55
+  });
+  hands.onResults(results=>{
+    indexFingers=[];
+    if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+      results.multiHandLandmarks.forEach((lm,hi)=>{
+        const tip=lm[8];
+        const x=(1-tip.x)*W, y=tip.y*H;
+        indexFingers.push({x,y});
+        if(!trails[hi]) trails[hi]={pts:[]};
+        trails[hi].pts.push({x,y,t:1});
+        if(trails[hi].pts.length>28) trails[hi].pts.shift();
+      });
+      camStatus.textContent='';
+    } else {
+      trails.forEach(t=>t.pts=[]);
+      camStatus.textContent='☝️ Show your index fingers to the camera!';
+    }
+  });
+  const camera=new Camera(videoEl,{
+    onFrame:async()=>{ await hands.send({image:videoEl}); },
+    width:1280, height:720
+  });
+  camera.start()
+    .then(()=>{ camStatus.textContent='✅ Camera ready! Press Start 🎮'; })
+    .catch(()=>{ camStatus.textContent='⚠️ Camera blocked! Please allow camera access.'; });
+}
 </script>
 </body>
 </html>
