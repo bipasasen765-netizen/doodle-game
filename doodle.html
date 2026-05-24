@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Fruit Slash</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#000; }
+
+#videoEl {
+  position:fixed; top:0; left:0;
+  width:100vw; height:100vh;
+  object-fit:cover;
+  transform:scaleX(-1);
+  z-index:0;
+}
+#gameCanvas {
+  position:fixed; top:0; left:0;
+  width:100vw; height:100vh;
+  z-index:1;
+}
+
+/* HUD */
+#hud {
+  position:fixed; top:0; left:0; width:100%;
+  display:flex; justify-content:space-between; align-items:center;
+  padding:16px 28px; z-index:10;
+  pointer-events:none;
+}
+.hud-box {
+  background:rgba(0,0,0,0.45);
+  backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,0.15);
+  border-radius:16px;
+  padding:8px 20px;
+}
+.hud-score {
+  font-size:1.8rem; font-weight:800; color:#fff;
+  text-shadow:0 0 14px #a78bfa;
+  font-family:'Segoe UI',sans-serif;
+}
+#livesEl { font-size:1.6rem; filter:drop-shadow(0 2px 6px rgba(0,0,0,0.9)); }
+
+/* Combo flash */
+#comboEl {
+  position:fixed; top:80px; left:50%; transform:translateX(-50%);
+  font-size:2.2rem; font-weight:900; color:#ffd700;
+  text-shadow:0 0 20px #ff8800;
+  font-family:'Segoe UI',sans-serif;
+  z-index:11; opacity:0;
+  transition:opacity 0.2s;
+  pointer-events:none;
+}
+
+/* Screens */
+.screen {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  z-index:20;
+  background:rgba(0,0,0,0.65);
+  backdrop-filter:blur(10px);
+  font-family:'Segoe UI',sans-serif;
+}
+.screen h2 {
+  font-size:3.2rem; font-weight:900; margin-bottom:8px;
+  background:linear-gradient(135deg,#f472b6,#a78bfa,#60a5fa);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}
+.screen p { color:#ccc; font-size:1rem; margin-bottom:24px; text-align:center; max-width:400px; line-height:1.9; }
+.play-btn {
+  padding:14px 44px; border:none; border-radius:50px;
+  font-size:1.1rem; font-weight:700;
+  background:linear-gradient(135deg,#a78bfa,#f472b6);
+  color:#fff; cursor:pointer;
+  box-shadow:0 0 30px rgba(167,139,250,0.6);
+  transition:all 0.2s;
+}
+.play-btn:hover { transform:scale(1.06); box-shadow:0 0 44px rgba(167,139,250,0.85); }
+.final-score { font-size:4rem; font-weight:900; color:#f472b6; margin:8px 0; text-shadow:0 0 24px #f472b6; }
+.high-score-label { color:#a78bfa; font-size:1rem; margin-bottom:20px; }
+
+/* Status bar */
+#camStatus {
+  position:fixed; bottom:16px; left:0; width:100%;
+  text-align:center; font-size:0.82rem; color:#fff;
+  text-shadow:0 1px 4px rgba(0,0,0,0.9);
+  z-index:10; font-family:'Segoe UI',sans-serif;
+  pointer-events:none;
+}
+
+/* Screen flash overlay */
+#flashEl {
+  position:fixed; inset:0; z-index:9;
+  pointer-events:none; opacity:0;
+  transition:opacity 0.08s;
+}
+</style>
+</head>
+<body>
+
+<video id="videoEl" playsinline></video>
+<canvas id="gameCanvas"></canvas>
+<div id="flashEl"></div>
+
+<div id="hud">
+  <div class="hud-box hud-score">⭐ <span id="scoreEl">0</span></div>
+  <div class="hud-box" id="livesEl">❤️❤️❤️</div>
+</div>
+<div id="comboEl"></div>
+
+<!-- Start Screen -->
+<div class="screen" id="startScreen">
+  <h2>🍉 Fruit Slash</h2>
+  <p>
+    ✋ Use your <b>index fingers</b> to slash fruits!<br/>
+    💣 Avoid bombs — they cost a life!<br/>
+    🎯 Hit 5 in a row for a combo bonus!<br/>
+    Show your hands to the camera and start!
+  </p>
+  <button class="play-btn" onclick="startGame()">▶ Start Game</button>
+</div>
+
+<!-- Game Over -->
+<div class="screen" id="overScreen" style="display:none">
+  <h2>💀 Game Over!</h2>
+  <div class="final-score" id="finalScore">0</div>
+  <div class="high-score-label" id="highScoreLabel"></div>
+  <p>Keep slashing to beat your best! 🎯</p>
+  <button class="play-btn" onclick="startGame()">🔄 Play Again</button>
+</div>
+
+<div id="camStatus">Starting camera…</div>
+
+<script>
+// ── Canvas Setup ──────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize(){ W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// ── Audio ─────────────────────────────────────────────────
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+document.addEventListener('click', () => { if(audioCtx.state==='suspended') audioCtx.resume(); }, {once:true});
+
+function playTone(type, freqStart, freqEnd, dur, vol=0.25){
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.type=type;
+  o.frequency.setValueAtTime(freqStart, audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(freqEnd, audioCtx.currentTime+dur);
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime+dur);
+  o.start(); o.stop(audioCtx.currentTime+dur);
+}
+const playSlice   = () => playTone('sawtooth', 900, 200, 0.12, 0.22);
+const playBombSnd = () => playTone('square',   130,  40, 0.4,  0.45);
+const playMiss    = () => playTone('sine',      250,  80, 0.35, 0.2);
+
+function playDing(){
+  [523,659,784].forEach((f,i)=>{
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type='sine'; o.frequency.value=f;
+    const t=audioCtx.currentTime+i*0.09;
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(0.18,t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.22);
+    o.start(t); o.stop(t+0.22);
+  });
+}
+function playComboSnd(n){
+  const freqs=[660,880,1100,1320,1540];
+  freqs.slice(0,Math.min(n,5)).forEach((f,i)=>{
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type='sine'; o.frequency.value=f;
+    const t=audioCtx.currentTime+i*0.07;
+    g.gain.setValueAtTime(0.15,t);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.18);
+    o.start(t); o.stop(t+0.18);
+  });
+}
+function playGameOver(){
+  [350,280,210,150].forEach((f,i)=>{
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type='sawtooth'; o.frequency.value=f;
+    const t=audioCtx.currentTime+i*0.18;
+    g.gain.setValueAtTime(0.2,t);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.22);
+    o.start(t); o.stop(t+0.22);
+  });
+}
+
+// ── Flash Effect ──────────────────────────────────────────
+const flashEl = document.getElementById('flashEl');
+function screenFlash(color='rgba(255,0,0,0.35)'){
+  flashEl.style.background = color;
+  flashEl.style.opacity = '1';
+  setTimeout(()=>flashEl.style.opacity='0', 90);
+}
+
+// ── Combo ─────────────────────────────────────────────────
+const comboEl = document.getElementById('comboEl');
+let combo = 0, comboTimer = null;
+function addCombo(){
+  combo++;
+  if(combo >= 3){
+    comboEl.textContent = `🔥 ${combo}x COMBO!`;
+    comboEl.style.opacity = '1';
+    playComboSnd(combo);
+    clearTimeout(comboTimer);
+    comboTimer = setTimeout(()=>{ comboEl.style.opacity='0'; combo=0; }, 1200);
+    return combo; // bonus multiplier
+  }
+  return 1;
+}
+function resetCombo(){ combo=0; comboEl.style.opacity='0'; }
+
+// ── High Score ────────────────────────────────────────────
+let highScore = parseInt(localStorage.getItem('fruitSlashHS')||'0');
+
+// ── Fruit Data ────────────────────────────────────────────
+const FRUITS=[
+  {emoji:'🍉',color:'#ff6b9d',juice:'#ff1a6e',r:72},
+  {emoji:'🍊',color:'#ff9f43',juice:'#ff6348',r:68},
+  {emoji:'🍎',color:'#ff4757',juice:'#c0392b',r:70},
+  {emoji:'🍋',color:'#ffd32a',juice:'#f9ca24',r:62},
+  {emoji:'🍇',color:'#9b59b6',juice:'#6c3483',r:66},
+  {emoji:'🥝',color:'#a8e063',juice:'#56ab2f',r:64},
+  {emoji:'🍓',color:'#ff6b81',juice:'#c0392b',r:66},
+  {emoji:'🍑',color:'#ffb347',juice:'#ff8c00',r:64},
+];
+
+// ── Particles ─────────────────────────────────────────────
+class Particle {
+  constructor(x,y,color){
+    this.x=x; this.y=y; this.color=color;
+    this.vx=(Math.random()-0.5)*11; this.vy=(Math.random()-0.5)*11-5;
+    this.life=1; this.r=Math.random()*7+3;
+  }
+  update(){ this.x+=this.vx; this.y+=this.vy; this.vy+=0.38; this.life-=0.032; }
+  draw(){
+    ctx.save(); ctx.globalAlpha=this.life;
+    ctx.fillStyle=this.color; ctx.shadowColor=this.color; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Fruit Class ───────────────────────────────────────────
+class Fruit {
+  constructor(forced){
+    const f = forced || FRUITS[Math.floor(Math.random()*FRUITS.length)];
+    this.emoji=f.emoji; this.color=f.color; this.juice=f.juice; this.r=f.r;
+    this.x=this.r+Math.random()*(W-this.r*2);
+    this.y=H+this.r+10;
+    this.vx=(Math.random()-0.5)*5;
+    this.vy=-(13+Math.random()*6);
+    this.rot=Math.random()*Math.PI*2;
+    this.rotV=(Math.random()-0.5)*0.12;
+    this.sliced=false; this.sliceAlpha=1;
+    this.isBomb=Math.random()<0.12;
+    if(this.isBomb){ this.emoji='💣'; this.color='#636e72'; this.juice='#2d3436'; this.r=62; }
+
+    // Two halves for split effect
+    this.half1=null; this.half2=null;
+  }
+  slice(){
+    this.sliced=true; this.sliceAlpha=1;
+    // Each half flies in opposite directions
+    const angle=(Math.random()*Math.PI*0.5)+Math.PI*0.25;
+    this.half1={ x:this.x, y:this.y, vx:-Math.cos(angle)*5, vy:-Math.sin(angle)*4-3, rot:this.rot, rotV:-0.18, alpha:1 };
+    this.half2={ x:this.x, y:this.y, vx: Math.cos(angle)*5, vy:-Math.sin(angle)*4-3, rot:this.rot, rotV: 0.18, alpha:1 };
+  }
+  update(){
+    if(!this.sliced){
+      this.vy+=0.3; this.x+=this.vx; this.y+=this.vy; this.rot+=this.rotV;
+    } else {
+      // Fade the whole fruit alpha (used for removal check)
+      this.sliceAlpha-=0.018;
+      // Move each half independently
+      if(this.half1){
+        this.half1.vy+=0.38; this.half1.x+=this.half1.vx; this.half1.y+=this.half1.vy;
+        this.half1.rot+=this.half1.rotV; this.half1.alpha-=0.022;
+      }
+      if(this.half2){
+        this.half2.vy+=0.38; this.half2.x+=this.half2.vx; this.half2.y+=this.half2.vy;
+        this.half2.rot+=this.half2.rotV; this.half2.alpha-=0.022;
+      }
+    }
+  }
+  drawHalf(half, clipDir){
+    // clipDir: -1 = left half, 1 = right half
+    if(!half || half.alpha<=0) return;
+    ctx.save();
+    ctx.translate(half.x, half.y);
+    ctx.rotate(half.rot);
+    ctx.globalAlpha=Math.max(0,half.alpha);
+    // Clip to show only half the emoji
+    ctx.beginPath();
+    const sz=this.r*2.5;
+    if(clipDir===-1) ctx.rect(-sz,-sz,sz,sz*2);
+    else             ctx.rect(0,  -sz,sz,sz*2);
+    ctx.clip();
+    ctx.font=`${this.r*2.2}px serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.shadowColor=this.juice; ctx.shadowBlur=28;
+    ctx.fillText(this.emoji,0,0);
+    ctx.restore();
+  }
+  draw(){
+    if(!this.sliced){
+      // Normal whole fruit
+      ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(this.rot);
+      ctx.font=`${this.r*2.2}px serif`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.shadowColor=this.color; ctx.shadowBlur=30;
+      ctx.fillText(this.emoji,0,0);
+      ctx.restore();
+    } else {
+      // Draw two flying halves
+      this.drawHalf(this.half1,-1);
+      this.drawHalf(this.half2, 1);
+    }
+  }
+  isOOB(){ return this.y>H+120; }
+}
+
+// ── Game State ────────────────────────────────────────────
+let score=0, lives=3, gameRunning=false, animId=null;
+let fruits=[], particles=[];
+let spawnTimer=0, spawnInterval=48;
+let indexFingers=[];
+let trails=[{pts:[]},{pts:[]}];
+let missedThisFrame=false;
+
+function spawnFruits(){
+  // After 40 pts: more fruits per wave + faster rise speed
+  const hard = score >= 40;
+  const count = hard ? (score>=70 ? 4 : 3) : (score>=10 ? 2 : 1);
+  for(let i=0;i<count;i++){
+    const f=new Fruit();
+    if(hard){
+      // Faster upward speed & more horizontal chaos
+      f.vy = -(16 + Math.random()*8);
+      f.vx = (Math.random()-0.5)*8;
+    }
+    fruits.push(f);
+  }
+}
+
+// ── Slice Logic ───────────────────────────────────────────
+function spawnParticles(x,y,color,n=22){
+  for(let i=0;i<n;i++) particles.push(new Particle(x,y,color));
+}
+
+function addPopup(x,y,text,color='#fff'){
+  particles.push({
+    isText:true, x, y:y-30, life:1,
+    update(){ this.y-=2.2; this.life-=0.028; },
+    draw(){
+      ctx.save(); ctx.globalAlpha=this.life;
+      ctx.fillStyle=color; ctx.font='bold 28px Segoe UI';
+      ctx.textAlign='center';
+      ctx.shadowColor=color; ctx.shadowBlur=12;
+      ctx.fillText(text,this.x,this.y);
+      ctx.restore();
+    }
+  });
+}
+
+function sliceFruit(f){
+  if(f.sliced) return; f.sliced=true;
+  if(f.isBomb){
+    playBombSnd(); lives--;
+    document.getElementById('livesEl').textContent='❤️'.repeat(Math.max(0,lives));
+    spawnParticles(f.x,f.y,'#636e72',28);
+    screenFlash('rgba(255,50,0,0.45)');
+    resetCombo();
+    addPopup(f.x,f.y,'💥 BOMB!','#ff4444');
+    canvas.style.transform='translate(10px,8px)';
+    setTimeout(()=>canvas.style.transform='translate(-8px,0)',80);
+    setTimeout(()=>canvas.style.transform='',160);
+    if(lives<=0) setTimeout(endGame,300);
+  } else {
+    const mult = addCombo();
+    const pts = mult>=3 ? mult : 1;
+    score += pts;
+    document.getElementById('scoreEl').textContent=score;
+    f.slice();
+    playSlice();
+    if(score%5===0) playDing();
+    spawnParticles(f.x,f.y,f.juice,28);
+    addPopup(f.x,f.y, pts>1?`+${pts} 🔥`:`+1`, pts>1?'#ffd700':'#fff');
+    screenFlash('rgba(255,255,255,0.08)');
+  }
+}
+
+// Check if line segment (ax,ay)→(bx,by) intersects a fruit circle
+function segmentHitsFruit(ax,ay,bx,by,f){
+  const dx=bx-ax, dy=by-ay;
+  const len2=dx*dx+dy*dy;
+  if(len2===0) return Math.hypot(f.x-ax,f.y-ay)<f.r+14;
+  let t=((f.x-ax)*dx+(f.y-ay)*dy)/len2;
+  t=Math.max(0,Math.min(1,t));
+  const px=ax+t*dx, py=ay+t*dy;
+  return Math.hypot(f.x-px,f.y-py)<f.r+14;
+}
+
+function checkSlice(){
+  if(!gameRunning) return;
+  // For each hand trail, check every consecutive pair of points
+  trails.forEach(trail=>{
+    const pts=trail.pts;
+    if(pts.length<2) return;
+    // Only check the last few segments (recent movement)
+    const start=Math.max(0,pts.length-6);
+    for(let i=start+1;i<pts.length;i++){
+      const a=pts[i-1], b=pts[i];
+      fruits.forEach(f=>{
+        if(f.sliced) return;
+        if(segmentHitsFruit(a.x,a.y,b.x,b.y,f)) sliceFruit(f);
+      });
+    }
+  });
+}
+
+// ── Trail Drawing ─────────────────────────────────────────
+function drawTrails(){
+  trails.forEach((trail,ti)=>{
+    trail.pts=trail.pts.filter(p=>p.t>0);
+    trail.pts.forEach(p=>p.t-=0.055);
+    const pts=trail.pts;
+    if(pts.length<2) return;
+    ctx.save(); ctx.lineCap='round'; ctx.lineJoin='round';
+    for(let i=1;i<pts.length;i++){
+      const a=pts[i-1], b=pts[i];
+      const hue=ti===0?300:190;
+      ctx.strokeStyle=`hsla(${hue},100%,72%,${b.t*0.88})`;
+      ctx.lineWidth=b.t*18;
+      ctx.shadowColor=`hsl(${hue},100%,70%)`;
+      ctx.shadowBlur=18;
+      ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+    }
+    ctx.restore();
+    // Glowing tip
+    const tip=pts[pts.length-1];
+    if(tip&&tip.t>0.3){
+      const hue=ti===0?300:190;
+      ctx.save();
+      ctx.beginPath(); ctx.arc(tip.x,tip.y,10,0,Math.PI*2);
+      ctx.fillStyle=`hsl(${hue},100%,90%)`;
+      ctx.shadowColor=`hsl(${hue},100%,70%)`; ctx.shadowBlur=22;
+      ctx.fill(); ctx.restore();
+    }
+  });
+}
+
+// ── Draw Finger Dots ──────────────────────────────────────
+function drawFingerDots(){
+  indexFingers.forEach((fp,i)=>{
+    const hue=i===0?300:190;
+    ctx.save();
+    // outer ring
+    ctx.strokeStyle=`hsla(${hue},100%,80%,0.7)`;
+    ctx.lineWidth=2.5; ctx.shadowColor=`hsl(${hue},100%,70%)`; ctx.shadowBlur=20;
+    ctx.beginPath(); ctx.arc(fp.x,fp.y,18,0,Math.PI*2); ctx.stroke();
+    // inner dot
+    ctx.fillStyle=`hsl(${hue},100%,92%)`;
+    ctx.shadowBlur=28;
+    ctx.beginPath(); ctx.arc(fp.x,fp.y,7,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  });
+}
+
+// ── Game Loop ─────────────────────────────────────────────
+function gameLoop(){
+  ctx.clearRect(0,0,W,H);
+
+  spawnTimer++;
+  if(spawnTimer>=spawnInterval){
+    spawnTimer=0;
+    spawnFruits();
+    // Before 40: gentle speedup. After 40: aggressive speedup
+    if(score < 40){
+      if(spawnInterval>36) spawnInterval = Math.max(36, spawnInterval-0.3);
+    } else {
+      if(spawnInterval>18) spawnInterval = Math.max(18, spawnInterval-0.8);
+    }
+  }
+
+  // Update & draw fruits
+  fruits.forEach(f=>f.update());
+  // Missed fruit — lose a life
+  fruits.forEach(f=>{
+    if(!f.sliced && !f.isBomb && f.isOOB()){
+      lives--;
+      document.getElementById('livesEl').textContent='❤️'.repeat(Math.max(0,lives));
+      playMiss(); resetCombo();
+      screenFlash('rgba(255,0,0,0.28)');
+      addPopup(f.x, H-60, 'MISS!', '#ff4444');
+      if(lives<=0) setTimeout(endGame,300);
+    }
+  });
+  // Keep sliced fruits visible until sliceAlpha fully fades
+  fruits=fruits.filter(f=>{
+    if(!f.sliced && f.isOOB()) return false;   // missed → remove
+    if(f.sliced && f.sliceAlpha<=0) return false; // faded → remove
+    return true;
+  });
+  fruits.forEach(f=>f.draw());
+
+  drawTrails();
+
+  particles=particles.filter(p=>p.life>0);
+  particles.forEach(p=>{ p.update(); p.draw(); });
+
+  drawFingerDots();
+  checkSlice();
+
+  if(gameRunning) animId=requestAnimationFrame(gameLoop);
+}
+
+// ── Start / End ───────────────────────────────────────────
+function startGame(){
+  if(audioCtx.state==='suspended') audioCtx.resume();
+  score=0; lives=3; gameRunning=true;
+  fruits=[]; particles=[]; trails=[{pts:[]},{pts:[]}];
+  spawnTimer=0; spawnInterval=48; indexFingers=[];
+  combo=0; comboEl.style.opacity='0';
+  document.getElementById('scoreEl').textContent='0';
+  document.getElementById('livesEl').textContent='❤️❤️❤️';
+  document.getElementById('startScreen').style.display='none';
+  document.getElementById('overScreen').style.display='none';
+  if(animId) cancelAnimationFrame(animId);
+  gameLoop();
+}
+
+function endGame(){
+  gameRunning=false;
+  if(animId) cancelAnimationFrame(animId);
+  playGameOver();
+  if(score>highScore){ highScore=score; localStorage.setItem('fruitSlashHS',highScore); }
+  document.getElementById('finalScore').textContent=score+' pts';
+  document.getElementById('highScoreLabel').textContent=`🏆 Best: ${highScore} pts`;
+  document.getElementById('overScreen').style.display='flex';
+}
+
+// ── MediaPipe Hands ───────────────────────────────────────
+const videoEl=document.getElementById('videoEl');
+const camStatus=document.getElementById('camStatus');
+
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({
+  maxNumHands:2,
+  modelComplexity:1,
+  minDetectionConfidence:0.65,
+  minTrackingConfidence:0.55
+});
+
+hands.onResults(results=>{
+  indexFingers=[];
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+    results.multiHandLandmarks.forEach((lm,hi)=>{
+      const tip=lm[8];
+      const x=(1-tip.x)*W, y=tip.y*H;
+      indexFingers.push({x,y});
+      if(!trails[hi]) trails[hi]={pts:[]};
+      trails[hi].pts.push({x,y,t:1});
+      if(trails[hi].pts.length>28) trails[hi].pts.shift();
+    });
+    camStatus.textContent='';
+  } else {
+    trails.forEach(t=>t.pts=[]);
+    camStatus.textContent='☝️ Show your index fingers to the camera!';
+  }
+});
+
+const camera=new Camera(videoEl,{
+  onFrame:async()=>{ await hands.send({image:videoEl}); },
+  width:1280, height:720
+});
+camera.start()
+  .then(()=>{ camStatus.textContent='✅ Camera ready! Press Start 🎮'; })
+  .catch(()=>{ camStatus.textContent='⚠️ Camera blocked! Please allow camera access.'; });
+</script>
+</body>
+</html>
