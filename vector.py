@@ -1,0 +1,12 @@
+import turtle
+win=turtle.Screen()
+lili=turtle.Turtle()
+lili.left(90)
+lili.forward(60)
+lili.left(90)
+lili.forward(60)
+lili.left(90)
+lili.forward(60)
+lili.left(90)
+lili.forward(90)
+win.exitonclick()
